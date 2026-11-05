@@ -1,4 +1,6 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+google_tasks_token.json
+client_secret.json
 
