@@ -5,7 +5,7 @@
 ## 手机订阅地址
 
 仓库部署到 GitHub Pages 后，订阅地址为：
-`https://<你的GitHub用户名>.github.io/<仓库名>/ddl.ics`
+`https://yyf419314-hub.github.io/my-ddl-calendar/ddl.ics`
 
 ---
 
@@ -42,3 +42,4 @@
 ```
 
 提交后，GitHub Actions 会在 1 分钟内自动更新日历，手机将在下一次自动刷新时同步最新内容。
+

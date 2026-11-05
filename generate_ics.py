@@ -77,3 +77,4 @@ def build_ics(tasks_path, output_path):
 if __name__ == "__main__":
     build_ics("ddl_list.json", "ddl.ics")
     print("成功生成 ddl.ics")
+
