@@ -4,5 +4,6 @@ __pycache__/
 google_tasks_token.json
 client_secret.json
 webhook_url.txt
+webhook_secret.txt
 ddl.ics
 public/

@@ -7,7 +7,7 @@ echo   一键同步：GitHub 日历 + Google Tasks
 echo ========================================
 echo.
 
-cd /d "D:\my-ddl-calendar"
+cd /d "%~dp0"
 
 :: 检测 Python 路径
 where python >nul 2>nul

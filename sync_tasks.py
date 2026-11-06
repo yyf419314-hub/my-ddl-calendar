@@ -14,8 +14,10 @@ import socket
 import sys
 from datetime import datetime, timezone, timedelta
 
-WEBHOOK_FILE = os.path.join(os.path.dirname(__file__), "webhook_url.txt")
-TASKS_JSON_FILE = os.path.join(os.path.dirname(__file__), "ddl_list.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WEBHOOK_FILE = os.path.join(BASE_DIR, "webhook_url.txt")
+SECRET_FILE = os.path.join(BASE_DIR, "webhook_secret.txt")
+TASKS_JSON_FILE = os.path.join(BASE_DIR, "ddl_list.json")
 
 def detect_proxy():
     """自动获取代理配置：优先环境变量，其次探测本机代理端口（7892 / 7890 等）"""
@@ -62,6 +64,12 @@ def sync_tasks(webhook_url=None) -> bool:
         print("错误: webhook_url.txt 中的链接格式不正确（必须以 https://script.google.com/ 开头）。", file=sys.stderr)
         return False
 
+    # 读取可选密钥
+    token = ""
+    if os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+
     if not os.path.exists(TASKS_JSON_FILE):
         print(f"错误: 找不到任务列表文件 {TASKS_JSON_FILE}", file=sys.stderr)
         return False
@@ -84,18 +92,13 @@ def sync_tasks(webhook_url=None) -> bool:
 
         utc_deadline = local_deadline - timedelta(hours=8)
         due_str = utc_deadline.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-        # 将具体时间作为显式显示字段传递，并在描述中前置
         due_display = local_deadline.strftime("%Y-%m-%d %H:%M")
-        desc = item.get("description", "")
-        # 在本地也确保 description 首行带上截止时间，保证即使旧版 GAS 也能看清时间
-        full_desc = f"【截止时间: {due_display}】\n{desc}".strip()
 
         payload_tasks.append({
             "id": item.get("id", ""),
             "title": item.get("title"),
             "course": item.get("course", ""),
-            "description": full_desc,
+            "description": item.get("description", ""),
             "due": due_str,
             "due_display": due_display
         })
@@ -104,17 +107,23 @@ def sync_tasks(webhook_url=None) -> bool:
         print("没有可同步的任务。")
         return True
 
+    payload = {
+        "tasks": payload_tasks
+    }
+    if token:
+        payload["token"] = token
+
     print(f"正在向 Google Tasks 推送 {len(payload_tasks)} 条任务...")
     proxies = detect_proxy()
     if proxies:
         print(f"已启用代理: {proxies.get('https')}")
 
-    # 优先尝试 requests 模块
+    # 优先使用 requests
     try:
         import requests
         resp = requests.post(
             webhook_url,
-            json={"tasks": payload_tasks},
+            json=payload,
             proxies=proxies,
             timeout=25,
             headers={"Content-Type": "application/json"},
@@ -127,7 +136,10 @@ def sync_tasks(webhook_url=None) -> bool:
                 result = {"status": "ok", "raw": resp.text}
 
             if result.get("status") == "ok":
-                print(f"同步成功！新增任务: {result.get('added', 0)} 条，跳过已存在: {result.get('skipped', 0)} 条。")
+                added = result.get("added", 0)
+                updated = result.get("updated", 0)
+                skipped = result.get("skipped", 0)
+                print(f"同步成功！新增: {added} 条，更新: {updated} 条，跳过（已完成）: {skipped} 条。")
                 print("提示: Google Tasks 作为清单展示，精确截止时间已记录在任务备注首行。")
                 return True
             else:
@@ -142,7 +154,7 @@ def sync_tasks(webhook_url=None) -> bool:
         import urllib.request
         import urllib.error
 
-        req_data = json.dumps({"tasks": payload_tasks}).encode("utf-8")
+        req_data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             webhook_url,
             data=req_data,

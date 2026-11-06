@@ -6,7 +6,7 @@ echo   正在同步任务到 Google Tasks
 echo ===================================
 echo.
 
-cd /d "D:\my-ddl-calendar"
+cd /d "%~dp0"
 
 where python >nul 2>nul
 if %errorlevel% equ 0 (
@@ -23,6 +23,8 @@ if %errorlevel% equ 0 (
 if %errorlevel% neq 0 (
     echo.
     echo [错误] 同步失败，请检查网络/代理或 Webhook 配置。
+    pause
+    exit /b 1
 ) else (
     echo.
     echo [成功] Google Tasks 任务清单已更新。

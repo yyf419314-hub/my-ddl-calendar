@@ -7,7 +7,7 @@ echo   正在更新 DDL 日历到 GitHub
 echo ===================================
 echo.
 
-cd /d "D:\my-ddl-calendar"
+cd /d "%~dp0"
 
 :: 检测 Python 路径
 where python >nul 2>nul
