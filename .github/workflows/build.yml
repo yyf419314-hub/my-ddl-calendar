@@ -7,10 +7,15 @@ on:
     paths:
       - 'ddl_list.json'
       - 'generate_ics.py'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -31,7 +36,6 @@ jobs:
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./
+          publish_dir: ./public
           publish_branch: gh-pages
           keep_files: false
-          exclude_assets: '.github,generate_ics.py'
