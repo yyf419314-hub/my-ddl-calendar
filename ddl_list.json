@@ -7,6 +7,14 @@
     "course": "PPD"
   },
   {
+    "id": "nba-gsw-nop-20261110",
+    "title": "【NBA】勇士 vs 鹈鹕",
+    "deadline": "2026-11-10 11:00:00",
+    "description": "NBA常规赛：金州勇士主场迎战新奥尔良鹈鹕（大通中心）",
+    "course": "NBA赛事",
+    "duration_minutes": 150
+  },
+  {
     "id": "titest-20261107",
     "title": "【体测】体质测试",
     "deadline": "2026-11-07 09:00:00",
