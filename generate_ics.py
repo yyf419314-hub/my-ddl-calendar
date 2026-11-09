@@ -72,6 +72,8 @@ def format_utc(dt: datetime) -> str:
 
 def parse_deadline(deadline_str: str) -> datetime:
     """解析截止时间，支持多种常用格式"""
+    if not isinstance(deadline_str, str) or not deadline_str.strip():
+        raise ValueError("缺少 deadline 字段或为空")
     formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
     for fmt in formats:
         try:
@@ -92,6 +94,10 @@ def build_ics(tasks_path: str, output_path: str) -> bool:
             print(f"错误: 解析 {tasks_path} 失败: {e}", file=sys.stderr)
             return False
 
+    if not isinstance(tasks, list):
+        print(f"错误: {tasks_path} 顶层结构必须是 JSON 数组", file=sys.stderr)
+        return False
+
     now_utc = datetime.now(timezone.utc)
 
     raw_lines = [
@@ -101,44 +107,79 @@ def build_ics(tasks_path: str, output_path: str) -> bool:
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         "X-WR-CALNAME:学业与课程 DDL",
-        "X-WR-TIMEZONE:Asia/Shanghai"
+        "X-WR-TIMEZONE:Asia/Shanghai",
+        "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
+        "X-PUBLISHED-TTL:PT1H"
     ]
 
+    seen_ids = set()
+    seen_uids = set()
+    has_error = False
     valid_count = 0
+
     for idx, item in enumerate(tasks, start=1):
+        if not isinstance(item, dict):
+            print(f"错误: 第 {idx} 项不是有效的 JSON 对象", file=sys.stderr)
+            has_error = True
+            continue
+
+        raw_summary = str(item.get("title", "")).strip()
+        if not raw_summary:
+            print(f"错误: 第 {idx} 项缺少有效的 title 字段", file=sys.stderr)
+            has_error = True
+            continue
+
         raw_deadline = item.get("deadline", "")
         try:
             local_deadline = parse_deadline(raw_deadline)
         except Exception as e:
-            print(f"警告: 跳过第 {idx} 项 ('{item.get('title', '未知')}'): {e}", file=sys.stderr)
+            print(f"错误: 第 {idx} 项 ('{raw_summary}') 时间格式非法: {e}", file=sys.stderr)
+            has_error = True
             continue
+
+        # 校验唯一 id
+        item_id = str(item.get("id", "")).strip()
+        if item_id:
+            if item_id in seen_ids:
+                print(f"错误: 第 {idx} 项 ('{raw_summary}') 的 id '{item_id}' 存在重复，请确保每条任务 id 唯一", file=sys.stderr)
+                has_error = True
+                continue
+            seen_ids.add(item_id)
+            item_uid = f"{item_id}@ddl-calendar"
+        else:
+            raw_id_str = f"{raw_summary}_{raw_deadline}"
+            item_uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_id_str))
+
+        if item_uid in seen_uids:
+            print(f"错误: 第 {idx} 项 ('{raw_summary}') 生成的 UID '{item_uid}' 冲突", file=sys.stderr)
+            has_error = True
+            continue
+        seen_uids.add(item_uid)
 
         # 北京时间 (UTC+8) 转 UTC 时间
         utc_deadline = local_deadline - timedelta(hours=8)
-        # 事件起止时间：以截止时间为起点，默认持续 15 分钟作为明确截止标识
-        # 从而使相对于 DTSTART 的 VALARM 准确在截止时刻前 24 小时和 2 小时触发
+        # 事件起止时间：以截止时间为起点，默认持续 15 分钟（可通过 duration_minutes 自定义）
+        duration_mins = item.get("duration_minutes", 15)
+        try:
+            duration_mins = max(0, int(duration_mins))
+        except (ValueError, TypeError):
+            duration_mins = 15
+
         utc_start = utc_deadline
-        utc_end = utc_deadline + timedelta(minutes=15)
+        utc_end = utc_deadline + timedelta(minutes=duration_mins)
 
-        # 稳定唯一 UID：优先使用数据源显式 id，缺省时降级为 UUID5 哈希
-        item_id = item.get("id")
-        if item_id:
-            item_uid = f"{item_id}@ddl-calendar"
-        else:
-            raw_id_str = f"{item.get('title', '')}_{raw_deadline}"
-            item_uid = str(uuid.uuid5(uuid.NAMESPACE_DNS, raw_id_str))
-
-        raw_summary = item.get("title", "未命名 DDL")
         raw_desc_parts = []
         if "course" in item and item["course"]:
             raw_desc_parts.append(f"课程: {item['course']}")
         if "description" in item and item["description"]:
-            raw_desc_parts.append(item["description"])
+            raw_desc_parts.append(str(item["description"]))
         raw_description = "\n".join(raw_desc_parts)
 
         # RFC 5545 转义
         summary_escaped = escape_text(raw_summary)
         description_escaped = escape_text(raw_description)
+        alarm_1d_desc = escape_text(f"【DDL提醒】{raw_summary}（还剩 1 天）")
+        alarm_2h_desc = escape_text(f"【DDL提醒】{raw_summary}（仅剩 2 小时）")
 
         raw_lines.extend([
             "BEGIN:VEVENT",
@@ -152,18 +193,22 @@ def build_ics(tasks_path: str, output_path: str) -> bool:
             # 提前 1 天（24小时）提醒
             "BEGIN:VALARM",
             "ACTION:DISPLAY",
-            "DESCRIPTION:距离 DDL 还有 1 天",
+            f"DESCRIPTION:{alarm_1d_desc}",
             "TRIGGER:-P1D",
             "END:VALARM",
             # 提前 2 小时提醒
             "BEGIN:VALARM",
             "ACTION:DISPLAY",
-            "DESCRIPTION:距离 DDL 仅剩 2 小时",
+            f"DESCRIPTION:{alarm_2h_desc}",
             "TRIGGER:-PT2H",
             "END:VALARM",
             "END:VEVENT"
         ])
         valid_count += 1
+
+    if has_error:
+        print("错误: 数据校验未通过，已中止生成 ICS 文件。", file=sys.stderr)
+        return False
 
     raw_lines.append("END:VCALENDAR")
 

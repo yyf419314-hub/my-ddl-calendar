@@ -21,7 +21,7 @@ var AUTH_TOKEN = "";
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return jsonResponse({ status: "error", message: "缺少请求体数据" }, 400);
+      return jsonResponse({ status: "error", message: "缺少请求体数据" });
     }
 
     var data = JSON.parse(e.postData.contents);
@@ -29,13 +29,13 @@ function doPost(e) {
     // 密钥校验
     if (AUTH_TOKEN && AUTH_TOKEN.trim() !== "") {
       if (!data.token || data.token !== AUTH_TOKEN) {
-        return jsonResponse({ status: "error", message: "身份验证失败：密钥错误或缺失" }, 401);
+        return jsonResponse({ status: "error", message: "身份验证失败：密钥错误或缺失" });
       }
     }
 
     var tasks = data.tasks;
     if (!Array.isArray(tasks) || tasks.length === 0) {
-      return jsonResponse({ status: "ok", added: 0, updated: 0, skipped: 0, message: "无任务需要同步" });
+      return jsonResponse({ status: "ok", added: 0, updated: 0, skipped: 0, deleted: 0, message: "无任务需要同步" });
     }
 
     var taskListId = "@default";
@@ -78,6 +78,8 @@ function doPost(e) {
     var addedCount = 0;
     var updatedCount = 0;
     var skippedCount = 0;
+    var deletedCount = 0;
+    var incomingIds = {};
 
     for (var i = 0; i < tasks.length; i++) {
       var item = tasks[i];
@@ -85,6 +87,9 @@ function doPost(e) {
       if (!title) continue;
 
       var taskId = item.id ? String(item.id).trim() : "";
+      if (taskId) {
+        incomingIds[taskId] = true;
+      }
       var normTitle = title.toLowerCase();
 
       // 构建规范的 notes 内容，包含截止时间、课程、说明以及唯一的 ddl-id 标记
@@ -96,7 +101,6 @@ function doPost(e) {
         noteLines.push("📚 课程：" + item.course);
       }
       if (item.description) {
-        // 清理原有 description 中可能重复的截止时间前缀
         var cleanDesc = item.description.replace(/^【截止时间:[^】]+】\s*/, "");
         if (cleanDesc) {
           noteLines.push(cleanDesc);
@@ -117,13 +121,32 @@ function doPost(e) {
       }
 
       if (matchedTask) {
-        // 若任务已被用户打勾完成，绝不重新插入，避免“死灰复燃”
+        // 若任务已在手机端被打勾完成，绝不重新激活或插入，避免“死灰复燃”
         if (matchedTask.status === "completed") {
           skippedCount++;
           continue;
         }
 
-        // 若任务未完成，使用 patch 更新标题、备注和日期
+        // 若本地 ddl_list.json 显式标记了 completed: true，则同步勾选完成
+        if (item.completed === true) {
+          Tasks.Tasks.patch({ status: "completed" }, taskListId, matchedTask.id);
+          updatedCount++;
+          continue;
+        }
+
+        // 对比内容是否有实际变化（标题、备注、截止日期前 10 位 YYYY-MM-DD）
+        var existingTitle = (matchedTask.title || "").trim();
+        var existingNotes = (matchedTask.notes || "").replace(/\r\n/g, "\n");
+        var existingDueDate = (matchedTask.due || "").substring(0, 10);
+        var targetDueDate = (item.due || "").substring(0, 10);
+
+        if (existingTitle === title && existingNotes === fullNotes && existingDueDate === targetDueDate) {
+          // 内容完全一致，直接跳过，节省 API 调用配额与耗时
+          skippedCount++;
+          continue;
+        }
+
+        // 内容有变更，调用 patch 原地更新
         var patchResource = {
           title: title,
           notes: fullNotes
@@ -135,10 +158,15 @@ function doPost(e) {
         Tasks.Tasks.patch(patchResource, taskListId, matchedTask.id);
         updatedCount++;
 
-        // 更新本地索引
         if (taskId) tasksById[taskId] = matchedTask;
         tasksByTitle[normTitle] = matchedTask;
       } else {
+        // 如果新任务本身已标记 completed: true，则无需作为待办插入
+        if (item.completed === true) {
+          skippedCount++;
+          continue;
+        }
+
         // 任务不存在，创建新任务
         var newTaskResource = {
           title: title,
@@ -151,9 +179,21 @@ function doPost(e) {
         var created = Tasks.Tasks.insert(newTaskResource, taskListId);
         addedCount++;
 
-        // 记入索引避免同批次内重复
         if (taskId) tasksById[taskId] = created;
         tasksByTitle[normTitle] = created;
+      }
+    }
+
+    // 3. 清理已从 ddl_list.json 中删除的未完成任务（仅限带有 [ddl-id:xxx] 标记的脚本托管任务，不影响用户手建任务）
+    if (data.prune_deleted === true) {
+      for (var existingId in tasksById) {
+        if (Object.prototype.hasOwnProperty.call(tasksById, existingId)) {
+          var oldTask = tasksById[existingId];
+          if (!incomingIds[existingId] && oldTask.status !== "completed") {
+            Tasks.Tasks.remove(taskListId, oldTask.id);
+            deletedCount++;
+          }
+        }
       }
     }
 
@@ -162,6 +202,7 @@ function doPost(e) {
       added: addedCount,
       updated: updatedCount,
       skipped: skippedCount,
+      deleted: deletedCount,
       message: "同步成功"
     });
 

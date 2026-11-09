@@ -60,11 +60,13 @@
 ```
 
 ### 字段说明
-- `id`：任务唯一标识（英文字符/拼音/数字），修改标题或时间时保持 `id` 不变，日历与 Google Tasks 会自动更新已有日程，不会生成重复事件。
-- `title`：任务标题。
-- `deadline`：截止时间（格式为 `YYYY-MM-DD HH:MM:SS` 或 `YYYY-MM-DD HH:MM`）。
+- `id`：任务唯一标识（英文字符/拼音/数字，必填且不可重复），修改标题或时间时保持 `id` 不变，日历与 Google Tasks 会自动更新已有日程，不会生成重复事件。
+- `title`：任务标题（必填）。
+- `deadline`：截止时间（必填，格式为 `YYYY-MM-DD HH:MM:SS` 或 `YYYY-MM-DD HH:MM`）。
 - `course`：课程名称（可选）。
 - `description`：补充说明（可选）。
+- `duration_minutes`：日历事件持续分钟数（可选，默认 `15` 分钟；如考试或体测可设为 `60` 或 `120`）。
+- `completed`：是否已完成（可选，设为 `true` 时会在同步时将 Google Tasks 中对应任务自动打勾完成）。
 
 修改保存后：
 - 双击运行本地的 `sync_all.bat`（一键同步到 Google Tasks 并提交推送到 GitHub）；

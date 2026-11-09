@@ -4,7 +4,8 @@
 
 注意：
 - Google Tasks API 的 due 字段只支持日期级别，时间部分会被官方 API 截断丢弃。
-- 因此 Google Tasks 定位为“每日待办清单”，具体精确截止时刻会同步写入任务备注首行。
+- 因此 due 直接使用北京时间当天日期（YYYY-MM-DDT00:00:00.000Z），避免早上 8 点前的任务因减 8 小时跨日到前一天。
+- Google Tasks 定位为“每日待办清单”，具体精确截止时刻会同步写入任务备注首行。
 - 精确到小时的弹窗提醒由 ICS 日历订阅（ddl.ics）提供。
 """
 
@@ -12,7 +13,7 @@ import json
 import os
 import socket
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEBHOOK_FILE = os.path.join(BASE_DIR, "webhook_url.txt")
@@ -43,13 +44,38 @@ def detect_proxy():
     return None
 
 def parse_deadline(deadline_str: str) -> datetime:
+    if not isinstance(deadline_str, str) or not deadline_str.strip():
+        raise ValueError("缺少 deadline 字段或为空")
     formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
     for fmt in formats:
         try:
             return datetime.strptime(deadline_str.strip(), fmt)
         except ValueError:
             pass
-    raise ValueError(f"无法解析时间: {deadline_str}")
+    raise ValueError(f"无法解析时间: '{deadline_str}'")
+
+def handle_response_text(body_text: str) -> bool:
+    """统一解析 Google Apps Script 返回的 JSON 结果"""
+    try:
+        result = json.loads(body_text)
+    except Exception:
+        print(f"错误: 服务端返回了非 JSON 响应（请检查 Webhook 部署权限是否为“任何人”）:\n{body_text[:300]}", file=sys.stderr)
+        return False
+
+    if result.get("status") == "ok":
+        added = result.get("added", 0)
+        updated = result.get("updated", 0)
+        skipped = result.get("skipped", 0)
+        deleted = result.get("deleted", 0)
+        summary = f"同步成功！新增: {added} 条，更新: {updated} 条，跳过（无变更或已完成）: {skipped} 条"
+        if deleted:
+            summary += f"，清理已移除任务: {deleted} 条"
+        print(summary + "。")
+        print("提示: Google Tasks 作为清单展示，精确截止时间已记录在任务备注首行。")
+        return True
+    else:
+        print(f"服务端返回错误: {result.get('message', body_text)}", file=sys.stderr)
+        return False
 
 def sync_tasks(webhook_url=None) -> bool:
     if not webhook_url:
@@ -81,34 +107,68 @@ def sync_tasks(webhook_url=None) -> bool:
             print(f"错误: 解析 {TASKS_JSON_FILE} 失败: {e}", file=sys.stderr)
             return False
 
+    if not isinstance(tasks, list):
+        print(f"错误: {TASKS_JSON_FILE} 顶层必须是数组", file=sys.stderr)
+        return False
+
     payload_tasks = []
-    for item in tasks:
+    seen_ids = set()
+    has_error = False
+
+    for idx, item in enumerate(tasks, start=1):
+        if not isinstance(item, dict):
+            print(f"错误: 第 {idx} 项不是有效的 JSON 对象", file=sys.stderr)
+            has_error = True
+            continue
+
+        title = str(item.get("title", "")).strip()
+        if not title:
+            print(f"错误: 第 {idx} 项缺少 title 字段", file=sys.stderr)
+            has_error = True
+            continue
+
         raw_dl = item.get("deadline", "")
         try:
             local_deadline = parse_deadline(raw_dl)
         except Exception as e:
-            print(f"警告: 跳过条目 '{item.get('title')}': {e}", file=sys.stderr)
+            print(f"错误: 第 {idx} 项 ('{title}') 时间格式非法: {e}", file=sys.stderr)
+            has_error = True
             continue
 
-        utc_deadline = local_deadline - timedelta(hours=8)
-        due_str = utc_deadline.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        item_id = str(item.get("id", "")).strip()
+        if item_id:
+            if item_id in seen_ids:
+                print(f"错误: 第 {idx} 项 ('{title}') 的 id '{item_id}' 重复", file=sys.stderr)
+                has_error = True
+                continue
+            seen_ids.add(item_id)
+
+        # Google Tasks API 的 due 仅保留 UTC 日期部分（YYYY-MM-DD），丢弃时分秒
+        # 直接使用北京时间的日期生成 YYYY-MM-DDT00:00:00.000Z，防止 00:00~07:59 的任务被减到前一天
+        due_str = local_deadline.strftime("%Y-%m-%dT00:00:00.000Z")
         due_display = local_deadline.strftime("%Y-%m-%d %H:%M")
 
         payload_tasks.append({
-            "id": item.get("id", ""),
-            "title": item.get("title"),
-            "course": item.get("course", ""),
-            "description": item.get("description", ""),
+            "id": item_id,
+            "title": title,
+            "course": str(item.get("course", "")).strip(),
+            "description": str(item.get("description", "")).strip(),
             "due": due_str,
-            "due_display": due_display
+            "due_display": due_display,
+            "completed": bool(item.get("completed", False))
         })
+
+    if has_error:
+        print("错误: 数据校验未通过，已中止向 Google Tasks 同步。", file=sys.stderr)
+        return False
 
     if not payload_tasks:
         print("没有可同步的任务。")
         return True
 
     payload = {
-        "tasks": payload_tasks
+        "tasks": payload_tasks,
+        "prune_deleted": True
     }
     if token:
         payload["token"] = token
@@ -130,27 +190,13 @@ def sync_tasks(webhook_url=None) -> bool:
             allow_redirects=True
         )
         if resp.status_code == 200:
-            try:
-                result = resp.json()
-            except Exception:
-                result = {"status": "ok", "raw": resp.text}
-
-            if result.get("status") == "ok":
-                added = result.get("added", 0)
-                updated = result.get("updated", 0)
-                skipped = result.get("skipped", 0)
-                print(f"同步成功！新增: {added} 条，更新: {updated} 条，跳过（已完成）: {skipped} 条。")
-                print("提示: Google Tasks 作为清单展示，精确截止时间已记录在任务备注首行。")
-                return True
-            else:
-                print(f"服务端返回错误: {result.get('message')}", file=sys.stderr)
-                return False
+            return handle_response_text(resp.text)
         else:
-            print(f"请求失败，状态码: {resp.status_code}, 内容: {resp.text}", file=sys.stderr)
+            print(f"请求失败，状态码: {resp.status_code}, 内容: {resp.text[:300]}", file=sys.stderr)
             return False
 
     except ImportError:
-        print("提示: 未检测到 requests 库，正在尝试使用标准库 urllib 同步（建议运行 pip install -r requirements.txt）...")
+        print("提示: 未检测到 requests 库，正在使用标准库 urllib 同步...")
         import urllib.request
         import urllib.error
 
@@ -169,8 +215,7 @@ def sync_tasks(webhook_url=None) -> bool:
         try:
             with opener.open(req, timeout=25) as response:
                 body = response.read().decode("utf-8")
-                print(f"同步请求已发送，响应: {body[:200]}")
-                return True
+                return handle_response_text(body)
         except Exception as err:
             print(f"网络请求出错: {err}", file=sys.stderr)
             return False
